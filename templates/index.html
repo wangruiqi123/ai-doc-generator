@@ -4,6 +4,13 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI 文档生成助手</title>
+    <!-- 引入 sql.js 库，用于在浏览器中运行 SQLite 数据库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+    <!-- 引入自定义数据库操作脚本，处理聊天记录的持久化存储 -->
+    <script src="/static/db.js"></script>
+    <!-- 引入 marked 库，用于将 Markdown 格式转换为 HTML -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 引入样式文件 -->
     <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,120 +20,232 @@
             <p>通过对话收集需求，自动生成技术方案文档</p>
         </header>
 
+        <!-- 聊天消息显示区域 -->
         <div id="chat-box">
             <div class="message assistant">
                 <div class="content">你好！我是 AI 文档生成助手。告诉我你想做什么项目，我会通过几个问题了解需求，然后帮你生成技术方案文档。</div>
             </div>
         </div>
 
+        <!-- 用户输入区域 -->
         <div class="input-area">
             <textarea id="input" placeholder="输入你的需求..." rows="1"></textarea>
             <button id="send-btn" onclick="sendMessage()">发送</button>
             <button id="export-btn" onclick="exportMarkdown()">导出文档</button>
         </div>
     </div>
-
+    <!-- 用于临时存储 Markdown 内容的隐藏区域 -->
+    <div id="markdown-content" style="white-space: normal;"></div>
+    
     <script>
+        // 获取 DOM 元素引用
         const chatBox = document.getElementById("chat-box");
         const input = document.getElementById("input");
         const sendBtn = document.getElementById("send-btn");
 
-        // 对话历史
+        // 存储完整的对话历史（用于发送给后端 API）
         let messages = [];
 
-        // 自动调整输入框高度
+        /**
+         * 自动调整输入框高度功能
+         * 当用户输入内容时，自动调整 textarea 高度以适应内容
+         * 最大高度限制为 120px，避免输入框过高
+         */
         input.addEventListener("input", function () {
             this.style.height = "auto";
             this.style.height = Math.min(this.scrollHeight, 120) + "px";
         });
 
-        // 回车发送（Shift+Enter 换行）
+        /**
+         * 回车键发送消息功能
+         * - 按 Enter 键发送消息（默认行为）
+         * - 按 Shift+Enter 组合键实现换行（阻止默认的发送行为）
+         */
         input.addEventListener("keydown", function (e) {
             if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
+                e.preventDefault(); // 阻止表单默认提交行为
                 sendMessage();
             }
         });
 
+        /**
+         * 初始化聊天历史功能
+         * 页面加载时从 SQLite 数据库中恢复之前的聊天记录
+         * 确保刷新页面后 Markdown 格式的聊天内容能够正确显示
+         */
+        async function initChatHistory() {
+            try {
+                // 调用 db.js 中的 getAllMessages 函数获取所有历史消息
+                // 该函数内部会等待数据库初始化完成后再执行查询
+                const history = await getAllMessages();
+                
+                // 如果存在历史消息，则恢复聊天界面
+                if (history && history.length > 0) {
+                    // 清空默认的欢迎消息
+                    chatBox.innerHTML = '';
+                    
+                    // 遍历所有历史消息并重新显示
+                    for (const msg of history) {
+                        // 将消息添加到内存中的消息数组
+                        messages.push({ role: msg.role, content: msg.content });
+                        // 异步渲染消息（支持 Markdown 到 HTML 的转换）
+                        await appendMessage(msg.role, msg.content);
+                    }
+                }
+            } catch (error) {
+                console.error('加载聊天历史失败:', error);
+            }
+        }
+
+        /**
+         * 页面加载完成事件监听器
+         * 使用 window.load 事件确保所有资源（包括脚本）都已加载完成
+         * 这样可以确保 db.js 已经完全初始化，sqliteDbReady Promise 可用
+         */
+        window.addEventListener('load', async function() {
+            await initChatHistory();
+        });
+
+        /**
+         * 备用的页面加载完成事件监听器（带延迟）
+         * 作为双重保险，确保即使第一次加载失败也能在稍后重试
+         * 延迟 500ms 给数据库初始化留出充足时间
+         */
+        window.addEventListener('load', async function() {
+            setTimeout(async () => {
+                await initChatHistory();
+            }, 500);
+        });
+
+        /**
+         * 发送消息主函数
+         * 处理用户输入、显示消息、调用 AI API、保存聊天记录等完整流程
+         */
         async function sendMessage() {
+            // 调试日志：检查输入元素状态
+            console.log("Input element:", input);
+            console.log("Input type:", typeof input);
+            console.log("Input value:", input ? input.value : "input is null");
+            
+            // 获取用户输入内容并去除首尾空白
             const text = input.value.trim();
+            // 如果输入为空，直接返回不执行后续操作
             if (!text) return;
 
-            // 显示用户消息
+            // 显示用户消息到聊天界面
             appendMessage("user", text);
+            // 将用户消息添加到内存中的消息数组
             messages.push({ role: "user", content: text });
+            // 清空输入框并重置高度
             input.value = "";
             input.style.height = "auto";
 
-            // 禁用发送按钮
+            // 禁用发送按钮，防止重复点击
             sendBtn.disabled = true;
 
-            // 创建助手消息容器
+            // 创建助手消息的容器（初始为空）
             const msgDiv = appendMessage("assistant", "");
             const contentDiv = msgDiv.querySelector(".content");
-
+            
             try {
+                // 将用户消息保存到 SQLite 数据库（持久化存储）
+                await addMessage('user', text);
+                
+                // 调用后端 AI API 获取响应
                 const response = await fetch("/api/chat", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ messages })
                 });
 
+                // 使用流式读取处理 AI 的逐步响应
                 const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let fullResponse = "";
 
+                // 持续读取 AI 响应直到完成
                 while (true) {
                     const { done, value } = await reader.read();
-                    if (done) break;
-
+                    if (done) {
+                        // AI 响应完成，将完整的助手回复保存到数据库
+                        await addMessage('assistant', fullResponse); 
+                        break;
+                    }
+                    
+                    // 解码接收到的数据块
                     const text = decoder.decode(value);
                     const lines = text.split("\n");
 
+                    // 处理 SSE (Server-Sent Events) 格式的响应
                     for (const line of lines) {
                         if (!line.startsWith("data: ")) continue;
                         const data = JSON.parse(line.slice(6));
 
+                        // 处理错误情况
                         if (data.error) {
                             contentDiv.textContent = "错误: " + data.error;
                             break;
                         }
+                        // 处理完成标志
                         if (data.done) break;
+                        // 处理内容片段
                         if (data.content) {
                             fullResponse += data.content;
-                            contentDiv.textContent = fullResponse;
+                            // 实时将 Markdown 转换为 HTML 并显示
+                            const html = await marked.parse(fullResponse);
+                            contentDiv.innerHTML = html;
                         }
                     }
                 }
 
+                // 将完整的助手回复添加到内存中的消息数组
                 messages.push({ role: "assistant", content: fullResponse });
             } catch (e) {
+                // 处理网络请求或解析错误
                 contentDiv.textContent = "请求失败: " + e.message;
             }
 
+            // 重新启用发送按钮
             sendBtn.disabled = false;
+            // 滚动聊天框到底部，确保最新消息可见
             chatBox.scrollTop = chatBox.scrollHeight;
         }
 
-        function appendMessage(role, content) {
+        /**
+         * 添加消息到聊天界面的函数
+         * 支持异步 Markdown 到 HTML 的转换，确保格式正确显示
+         * @param {string} role - 消息角色 ('user' 或 'assistant')
+         * @param {string} content - 消息内容（支持 Markdown 格式）
+         * @returns {HTMLElement} 返回创建的消息 DOM 元素
+         */
+        async function appendMessage(role, content) {
             const div = document.createElement("div");
             div.className = "message " + role;
-            div.innerHTML = `<div class="content">${content}</div>`;
+            // 异步将 Markdown 内容转换为 HTML
+            const htmlContent = await marked.parse(content);
+            div.innerHTML = `<div class="content">${htmlContent}</div>`;
             chatBox.appendChild(div);
             chatBox.scrollTop = chatBox.scrollHeight;
             return div;
         }
 
+        /**
+         * 导出 Markdown 文档功能
+         * 从聊天历史中找到包含 Markdown 标题的技术方案文档并导出
+         */
         function exportMarkdown() {
-            // 找到最后一条包含 Markdown 标题的助手消息
+            // 筛选出所有助手发送的消息
             const assistantMsgs = messages.filter(m => m.role === "assistant");
+            // 从最新消息开始查找，找到第一个包含 Markdown 标题（# ）的消息
             const doc = assistantMsgs.reverse().find(m => m.content.includes("# "));
-
+            
+            // 如果没有找到有效的文档，提示用户
             if (!doc) {
                 alert("还没有生成文档，请先完成需求问诊。");
                 return;
             }
 
+            // 创建 Blob 对象用于文件下载
             const blob = new Blob([doc.content], { type: "text/markdown" });
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);

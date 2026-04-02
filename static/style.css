@@ -131,3 +131,28 @@ button {
 #export-btn:hover {
     background: #2d8f47;
 }
+
+#markdown-content {
+    overflow-x: auto;  /* 当表格过宽时出现滚动条 */
+}
+
+#markdown-content table {
+    border-collapse: collapse;  /* 合并边框 */
+    width: 100%;
+    margin: 1em 0;
+    font-size: 0.9em;
+}
+
+markdown-content th,
+#markdown-content td {
+    border: 1px solid #ddd;    /* 边框颜色 */
+    padding: 8px 12px;         /* 内边距 */
+    text-align: left;          /* 文字左对齐 */
+    vertical-align: top;       /* 垂直顶部对齐 */
+}
+
+/* 表头背景加粗 */
+#markdown-content th {
+    background-color: #f2f2f2;
+    font-weight: 600;
+}
